@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- User Rules ---
+    function isValidUser(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.email is string && data.email.size() > 0 && data.email.size() < 100 &&
+             (!data.keys().hasAny(['bio']) || (data.bio is string && data.bio.size() < 500)) &&
+             data.createdAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if false; // Users cannot list all profiles
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['name', 'bio', 'photoURL']) &&
+                      incoming().name is string && incoming().name.size() > 0;
+    }
+
+    // --- Post Rules ---
+    function isValidPost(data) {
+      return data.content is string && data.content.size() > 0 && data.content.size() < 5000 &&
+             data.authorId == request.auth.uid &&
+             data.authorName is string &&
+             data.createdAt == request.time;
+    }
+
+    match /posts/{postId} {
+      allow read: if true;
+      allow create: if isSignedIn() && isValidPost(incoming()) && isValidId(postId);
+      allow update: if isSignedIn() && (
+        // Action: Edit Post
+        (isOwner(existing().authorId) && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['content']) &&
+         incoming().content is string && incoming().content.size() > 0) ||
+        // Action: Like
+        (incoming().diff(existing()).affectedKeys().hasOnly(['likesCount']) &&
+         incoming().likesCount == existing().likesCount + 1)
+      );
+      allow delete: if isOwner(existing().authorId);
+    }
+
+    // --- Comment Rules ---
+    function isValidComment(data) {
+      return data.content is string && data.content.size() > 0 && data.content.size() < 1000 &&
+             data.postId is string &&
+             data.authorId == request.auth.uid &&
+             data.createdAt == request.time;
+    }
+
+    match /comments/{commentId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidComment(incoming()) && isValidId(commentId);
+      allow delete: if isOwner(existing().authorId);
+    }
+  }
+}
